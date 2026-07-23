@@ -1,23 +1,30 @@
+import os
 from typing import Annotated, Sequence
 import logging
 import sys
 from datetime import datetime
 from functools import lru_cache
 import asyncio
-
 import uvicorn
 from fastapi import FastAPI, BackgroundTasks
 from fastapi.responses import StreamingResponse
 from langchain_chroma import Chroma
+
 # Core LangChain & LangGraph packages
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
-# Modern, split Ollama & Chroma integrations
-from langchain_ollama import OllamaEmbeddings, ChatOllama
+
+# REPLACED: ChatOllama with ChatGroq
+from langchain_ollama import OllamaEmbeddings
+from langchain_groq import ChatGroq
+
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import StateGraph, START, END
 from langgraph.graph.message import add_messages
 from pydantic import BaseModel
 from typing_extensions import TypedDict
+
+from dotenv import load_dotenv
+load_dotenv()
 
 # Setup logging to console and file
 logging.basicConfig(
@@ -29,7 +36,6 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
-
 logger.info("=" * 80)
 logger.info("Starting Business Chatbot API Initialization")
 logger.info("=" * 80)
@@ -39,20 +45,23 @@ logger.info("=" * 80)
 # ==========================================
 app = FastAPI(title="Business Chatbot API", description="RAG-based chatbot backend")
 
+
 # Request/Response models
 class ChatRequest(BaseModel):
     message: str
     thread_id: str = "default_thread"
 
+
 class ChatResponse(BaseModel):
     reply: str
+
 
 # ==========================================
 # CONNECT TO YOUR LOCAL CHROMA VECTOR DB
 # ==========================================
 persist_db_dir = "./chroma_db"
-
 logger.info(f"Loading ChromaDB from: {persist_db_dir}")
+
 # Setup the matching Nomic librarian model (smaller, faster embedding)
 embeddings = OllamaEmbeddings(model="nomic-embed-text")
 logger.info("Embeddings model loaded: nomic-embed-text")
@@ -72,22 +81,22 @@ retriever = vector_store.as_retriever(
 )
 logger.info("Retriever initialized with MMR, k=2")
 
-# Setup Chat Generation Model with optimizations
-llm = ChatOllama(
-    model="qwen2.5:3b",
-    temperature=0.3,  # Lower temp = faster, more deterministic
-    num_predict=256,  # Limit output tokens for faster generation
-    num_ctx=1024,     # Smaller context window for speed
-    num_threads=4,    # Use available cores
+# ==========================================
+# REPLACED: CHAT OLLAMA WITH CHAT GROQ
+# ==========================================
+# Replace "YOUR_GROQ_API_KEY" with your actual key or use os.environ.get("GROQ_API_KEY")
+llm = ChatGroq(
+    model="llama-3.3-70b-versatile",
+    temperature=0.3,
+    groq_api_key=os.environ.get("GROQ_API_KEY")
 )
-logger.info("LLM model loaded: qwen2.5:3b (optimized)")
+logger.info("LLM model loaded: llama-3.3-70b-versatile via Groq")
 logger.info("=" * 80)
 
 
 # ==========================================
 # DEFINE LANGGRAPH WORKFLOW
 # ==========================================
-
 # 1. Define the Chatbot State
 class ChatState(TypedDict):
     messages: Annotated[Sequence[BaseMessage], add_messages]
@@ -107,20 +116,30 @@ def chatbot_node(state: ChatState):
 
     # Try cache first for faster response on repeated queries
     context = get_cached_context(user_message)
-    
+
     # Shorter, more efficient system prompt
-    system_prompt = (
-        "You are a concise business assistant. Answer based on provided context only.\n\n"
-        f"Context:\n{context}"
-    )
+    system_prompt = f"""
+    You are a helpful business assistant.
+
+    Answer the user's question ONLY using the provided company documents.
+
+    Instructions:
+    - Use the context whenever possible.
+    - If the answer is not present in the context, say:
+      "I don't have enough information to answer that based on the available documents."
+    - Do NOT make up facts.
+    - Format answers clearly using bullet points or paragraphs when appropriate.
+
+    Context:
+    {context}
+    """
 
     # Keep only last 2 messages for minimal context
     messages_window = state["messages"][-2:] if len(state["messages"]) > 2 else state["messages"]
     formatted_messages = [HumanMessage(content=system_prompt)] + list(messages_window)
 
-    # Invoke the LLM (faster with optimizations above)
+    # Invoke the LLM
     response = llm.invoke(formatted_messages)
-
     return {"messages": [AIMessage(content=response.content)]}
 
 
@@ -134,25 +153,24 @@ workflow.add_edge("chatbot", END)
 memory = MemorySaver()
 app_graph = workflow.compile(checkpointer=memory)
 
+
 # ==========================================
 # API ENDPOINTS
 # ==========================================
-
 @app.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
     """Process chat message and return response from the RAG pipeline"""
     import time
     start_time = time.time()
-    
     try:
         config = {"configurable": {"thread_id": request.thread_id}}
-        
+
         # Execute graph with streaming
         events = app_graph.stream(
             {"messages": [HumanMessage(content=request.message)]},
             config
         )
-        
+
         # Extract response efficiently
         response_text = ""
         for event in events:
@@ -160,11 +178,11 @@ async def chat(request: ChatRequest):
                 if isinstance(value, dict) and 'messages' in value:
                     if value['messages']:
                         response_text = value['messages'][-1].content
-        
+
         elapsed_time = time.time() - start_time
         logger.info(f"✓ {request.thread_id}: {elapsed_time:.2f}s")
         return ChatResponse(reply=response_text or "No response generated.")
-    
+
     except Exception as e:
         elapsed_time = time.time() - start_time
         logger.error(f"✗ Error ({elapsed_time:.2f}s): {str(e)}")
@@ -215,5 +233,5 @@ if __name__ == "__main__":
     logger.info("Starting Uvicorn server on 0.0.0.0:8000")
     logger.info("Press CTRL+C to stop")
     logger.info("=" * 80)
-    # timeout: 120 seconds - allows time for LLM processing
+
     uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info", timeout_keep_alive=120)
