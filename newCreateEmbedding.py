@@ -147,11 +147,19 @@ embeddings = OllamaEmbeddings(
 
 print("Creating Chroma Vector Database...")
 
-vector_store = Chroma.from_documents(
-    documents=documents,
-    embedding=embeddings,
-    persist_directory=persist_db_dir,
-)
+BATCH_SIZE = 50
+
+for i in range(0, len(documents), BATCH_SIZE):
+    batch = documents[i:i + BATCH_SIZE]
+    print(f"Processing Batch : {i}")
+    if i == 0:
+        vector_store = Chroma.from_documents(
+            documents=batch,
+            embedding=embeddings,
+            persist_directory=persist_db_dir
+        )
+    else:
+        vector_store.add_documents(documents=batch)
 
 print("\n======================================")
 print("Embedding completed successfully!")
