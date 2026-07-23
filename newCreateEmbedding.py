@@ -210,16 +210,22 @@ vector_store = Chroma(
 for i in range(0, len(documents), BATCH_SIZE):
     batch = documents[i:i + BATCH_SIZE]
     print(f"Processing Batch : {i}")
+    seen_ids = set()
+    dedup_batch = []
     custom_ids = []
     for doc in batch:
         # Encode string to bytes for hashing
         text_bytes = doc.page_content.encode('utf-8')
         # Create a hex string hash
         content_hash = hashlib.md5(text_bytes).hexdigest()
+        if content_hash in seen_ids:
+            continue
+        seen_ids.add(content_hash)
+        dedup_batch.append(doc)
         custom_ids.append(content_hash)
 
     # 3. Add documents with their unique hashes
-    vector_store.add_documents(documents=batch, ids=custom_ids)
+    vector_store.add_documents(documents=dedup_batch, ids=custom_ids)
 
 print("\n======================================")
 print("Embedding completed successfully!")
