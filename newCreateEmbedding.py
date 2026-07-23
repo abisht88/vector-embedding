@@ -101,20 +101,20 @@ all_documents.extend(github_documents)
 # LOAD CONFLUENCE DOCUMENTS
 # ==========================================
 
-# print("Loading Confluence pages...")
-#
-# confluence_loader = ConfluenceLoader(
-#     url=os.getenv("CONFLUENCE_URL"),
-#     username=os.getenv("CONFLUENCE_EMAIL"),
-#     api_key=os.getenv("CONFLUENCE_API_TOKEN"),
-#     space_key="ENG",          # Change accordingly
-# )
-#
-# confluence_documents = confluence_loader.load()
-#
-# print(f"Loaded {len(confluence_documents)} Confluence pages")
-#
-# all_documents.extend(confluence_documents)
+print("Loading Confluence pages...")
+
+confluence_loader = ConfluenceLoader(
+    url="https://sakshijadhav2123.atlassian.net/wiki/spaces/~7120208d5930615bb548c89e9fc6c9bda1049e/pages/458755/Developer+Guide+Part+1+Introduction+System+Overview",
+    username="pajpanideep@gmail.com",
+    api_key=os.getenv("CONFLUENCE_API_TOKEN"),
+    space_key="ENG",
+)
+
+confluence_documents = confluence_loader.load()
+
+print(f"Loaded {len(confluence_documents)} Confluence pages")
+
+all_documents.extend(confluence_documents)
 
 # ==========================================
 # SPLIT DOCUMENTS
