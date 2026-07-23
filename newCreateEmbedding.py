@@ -1,10 +1,11 @@
 import os
+import hashlib
 from dotenv import load_dotenv
-
 from langchain_community.document_loaders import (
     PyPDFDirectoryLoader,
     GithubFileLoader,
     ConfluenceLoader,
+    WebBaseLoader
 )
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_ollama import OllamaEmbeddings
@@ -18,7 +19,7 @@ load_dotenv()
 # ==========================================
 
 docs_dir = "./rag_pipeline_docs"
-persist_db_dir = "chroma_db_1"
+persist_db_dir = "chroma_db"
 
 all_documents = []
 
@@ -104,17 +105,69 @@ all_documents.extend(github_documents)
 print("Loading Confluence pages...")
 
 confluence_loader = ConfluenceLoader(
-    url="https://ashutoshbisht88.atlassian.net/wiki/x/EwAG",
+    url="https://ashutoshbisht88.atlassian.net/wiki",
     username="ashutoshbisht88@gmail.com",
     api_key="ATATT3xFfGF0ZrPJkaX26Orc79heKc4uN5q5rs2SgKZcgqTLloaTnnQAaPEiiIBeWYf_8ykueFa2K10a4IyhNGEoEb-9OQfqxyg5O_1en_6HrZ092BjwCx8Cm_J_8yL33Gi_4WO_eJLT77saEPudMfCpcau0ZD5eU4Jjxvo0V2MI91jEpZoifss=A4F1D3CB",
-    space_key="5fd75d101051d10075af0f44"
+    space_key="RAGHACK",
+    cloud=True
 )
 
-confluence_documents = confluence_loader.load()
+try:
+    # 1. Fetch all documents from the space
+    confluence_documents = confluence_loader.load()
 
-print(f"Loaded {len(confluence_documents)} Confluence pages")
+    print(f"--- Found {len(confluence_documents)} pages in space 'RAGHACK' ---\n")
 
-all_documents.extend(confluence_documents)
+    # 2. Iterate and print clear metadata anchors
+    for idx, doc in enumerate(confluence_documents, 1):
+        title = doc.metadata.get("title", "Untitled Page")
+        source_url = doc.metadata.get("source", "No URL available")
+
+        print(f"[{idx}] {title}")
+        print(f"    🔗 Link: {source_url}")
+        print("-" * 40)
+
+    print(f"Loaded {len(confluence_documents)} Confluence pages")
+
+    all_documents.extend(confluence_documents)
+except Exception as e:
+    print(f"Failed to fetch pages: {e}")
+
+
+
+# 1. Load the Investopedia webpage
+url = "https://www.investopedia.com/terms/q/quantitative-trading.asp"
+loader = WebBaseLoader(
+    web_path=url,
+    header_template={
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+)
+raw_documents = loader.load()
+
+print(f"Loaded {len(raw_documents)} investopedia pages...")
+
+all_documents.extend(raw_documents)
+
+# # 2. Configure the recursive text splitter
+# text_splitter = RecursiveCharacterTextSplitter(
+#     chunk_size=1000,       # Targets ~1000 characters per chunk
+#     chunk_overlap=200,     # Overlaps 200 characters to prevent cutting off context
+#     length_function=len,
+#     separators=["\n\n", "\n", " ", ""]  # Split priorities
+# )
+#
+# # 3. Split the loaded document into clean chunks
+# chunked_documents = text_splitter.split_documents(raw_documents)
+#
+# print(f"📄 Original Documents: {len(raw_documents)}")
+# print(f"🧩 Total Text Chunks Created: {len(chunked_documents)}\n")
+#
+# # 4. Preview the first 2 chunks
+# for idx, chunk in enumerate(chunked_documents[:2], 1):
+#     print(f"--- Chunk {idx} (Length: {len(chunk.page_content)}) ---")
+#     print(chunk.page_content.strip())
+#     print(f"Metadata: {chunk.metadata}\n")
 
 # ==========================================
 # SPLIT DOCUMENTS
@@ -149,17 +202,24 @@ print("Creating Chroma Vector Database...")
 
 BATCH_SIZE = 50
 
+vector_store = Chroma(
+    persist_directory=persist_db_dir,
+    embedding_function=embeddings
+)
+
 for i in range(0, len(documents), BATCH_SIZE):
     batch = documents[i:i + BATCH_SIZE]
     print(f"Processing Batch : {i}")
-    if i == 0:
-        vector_store = Chroma.from_documents(
-            documents=batch,
-            embedding=embeddings,
-            persist_directory=persist_db_dir
-        )
-    else:
-        vector_store.add_documents(documents=batch)
+    custom_ids = []
+    for doc in batch:
+        # Encode string to bytes for hashing
+        text_bytes = doc.page_content.encode('utf-8')
+        # Create a hex string hash
+        content_hash = hashlib.md5(text_bytes).hexdigest()
+        custom_ids.append(content_hash)
+
+    # 3. Add documents with their unique hashes
+    vector_store.add_documents(documents=batch, ids=custom_ids)
 
 print("\n======================================")
 print("Embedding completed successfully!")
