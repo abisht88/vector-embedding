@@ -1,0 +1,4 @@
+venv/
+chatbot_server.log
+chat_history.json
+.env

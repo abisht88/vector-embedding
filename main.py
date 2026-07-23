@@ -1,4 +1,7 @@
 import os
+import io
+import csv
+import requests
 from typing import Annotated, Sequence
 import logging
 import sys
@@ -6,9 +9,12 @@ from datetime import datetime
 from functools import lru_cache
 import asyncio
 import uvicorn
-from fastapi import FastAPI, BackgroundTasks
+from fastapi import FastAPI, BackgroundTasks, UploadFile, File, Form, HTTPException
 from fastapi.responses import StreamingResponse
 from langchain_chroma import Chroma
+from langchain_core.documents import Document
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_core.runnables import RunnableConfig
 
 # Core LangChain & LangGraph packages
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
@@ -95,6 +101,215 @@ logger.info("=" * 80)
 
 
 # ==========================================
+# ON-THE-FLY DOCUMENT UPLOAD (per-conversation, in-memory)
+# ==========================================
+# Uploaded documents are embedded into a throwaway Chroma collection scoped
+# to the thread_id, so they only ever answer questions in that conversation
+# and never pollute the shared knowledge base in ./chroma_db.
+#
+# Uses Jina's hosted embeddings API (jina-embeddings-v5-omni-nano) instead of
+# the local Ollama model — only for this feature, everything else keeps
+# using `embeddings` (nomic-embed-text).
+class JinaEmbeddings:
+    def __init__(self, api_key: str, model: str = "jina-embeddings-v5-omni-nano"):
+        self.api_key = api_key
+        self.model = model
+
+    def _embed(self, texts: list[str]) -> list[list[float]]:
+        response = requests.post(
+            "https://api.jina.ai/v1/embeddings",
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+            },
+            json={"model": self.model, "input": texts},
+            timeout=60,
+        )
+        response.raise_for_status()
+        data = response.json()["data"]
+        return [item["embedding"] for item in data]
+
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        return self._embed(texts)
+
+    def embed_query(self, text: str) -> list[float]:
+        return self._embed([text])[0]
+
+
+jina_embeddings = JinaEmbeddings(api_key=os.environ.get("JINA_API_KEY"))
+
+session_vectorstores: dict[str, Chroma] = {}
+session_filenames: dict[str, list[str]] = {}
+text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=150)
+
+
+def extract_text(filename: str, data: bytes) -> str:
+    """Best-effort text extraction for the file types the uploader accepts."""
+    ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+
+    if ext == "pdf":
+        from pypdf import PdfReader
+        reader = PdfReader(io.BytesIO(data))
+        return "\n\n".join(page.extract_text() or "" for page in reader.pages)
+
+    if ext == "docx":
+        import docx
+        document = docx.Document(io.BytesIO(data))
+        return "\n".join(p.text for p in document.paragraphs)
+
+    if ext in ("txt", "md"):
+        return data.decode("utf-8", errors="ignore")
+
+    if ext == "csv":
+        text = data.decode("utf-8", errors="ignore")
+        rows = list(csv.reader(io.StringIO(text)))
+        return "\n".join(", ".join(row) for row in rows)
+
+    if ext in ("xlsx", "xls"):
+        from openpyxl import load_workbook
+        wb = load_workbook(io.BytesIO(data), data_only=True)
+        lines = []
+        for sheet in wb.worksheets:
+            lines.append(f"# Sheet: {sheet.title}")
+            for row in sheet.iter_rows(values_only=True):
+                lines.append(", ".join("" if c is None else str(c) for c in row))
+        return "\n".join(lines)
+
+    raise ValueError(f"Unsupported file type: .{ext}")
+
+
+def get_session_context(thread_id: str, query: str, k: int = 3) -> str:
+    vs = session_vectorstores.get(thread_id)
+    if vs is None:
+        return ""
+    docs = vs.similarity_search(query, k=k)
+    return "\n\n".join(doc.page_content for doc in docs)
+
+
+# ==========================================
+# RENDER LOG DIAGNOSIS
+# ==========================================
+# Reads recent logs from a service deployed on Render, picks out the error
+# entries, and uses a self-authored troubleshooting guide (ingested
+# separately via ingest_troubleshooting_kb.py into
+# ./chroma_db_troubleshooting) as a knowledge base to suggest a fix for
+# each one.
+RENDER_API_KEY = os.environ.get("RENDER_API_KEY")
+RENDER_OWNER_ID = os.environ.get("RENDER_OWNER_ID")
+RENDER_DUMMY_SERVICE_ID = os.environ.get("RENDER_DUMMY_SERVICE_ID")
+
+troubleshooting_vector_store = Chroma(
+    persist_directory="./chroma_db_troubleshooting",
+    embedding_function=embeddings,
+    collection_name="troubleshooting_kb",
+    collection_metadata={"hnsw:space": "cosine"},
+)
+troubleshooting_retriever = troubleshooting_vector_store.as_retriever(
+    search_type="mmr",
+    search_kwargs={"k": 3, "lambda_mult": 0.5},
+)
+
+
+def get_troubleshooting_context(query: str, k: int = 3, min_relevance: float = 0.6) -> str:
+    """Only pull in troubleshooting KB context when it's actually relevant —
+    otherwise every chat message (even unrelated ones) would get KB noise
+    injected via plain top-k retrieval."""
+    results = troubleshooting_vector_store.similarity_search_with_relevance_scores(query, k=k)
+    relevant = [doc.page_content for doc, score in results if score >= min_relevance]
+    return "\n\n".join(relevant)
+
+
+def fetch_render_logs(service_id: str, limit: int = 100) -> list[dict]:
+    if not (RENDER_API_KEY and RENDER_OWNER_ID):
+        raise RuntimeError("RENDER_API_KEY / RENDER_OWNER_ID not configured")
+    response = requests.get(
+        "https://api.render.com/v1/logs",
+        headers={"Authorization": f"Bearer {RENDER_API_KEY}"},
+        params={"resource": service_id, "ownerId": RENDER_OWNER_ID, "limit": limit},
+        timeout=30,
+    )
+    response.raise_for_status()
+    return response.json().get("logs", [])
+
+
+def _log_level(log: dict) -> str:
+    return next((l["value"] for l in log.get("labels", []) if l["name"] == "level"), "")
+
+
+def diagnose_render_errors(service_id: str, limit: int = 100, max_errors: int = 5) -> list[dict]:
+    logs = fetch_render_logs(service_id, limit=limit)
+
+    # Python logger.exception() writes the summary line at "error" level and
+    # the traceback (which has the actual exception type/message we care
+    # about) as separate "info"-level lines right after it. Stitch those back
+    # together so the real error text is available for retrieval.
+    error_logs = []
+    i = 0
+    while i < len(logs):
+        if _log_level(logs[i]) == "error":
+            parts = [logs[i]["message"]]
+            j = i + 1
+            while j < len(logs) and _log_level(logs[j]) != "error" and j - i <= 5:
+                next_msg = logs[j]["message"]
+                # Stop stitching once we hit the next real timestamped log line.
+                if next_msg.startswith("[20") or _log_level(logs[j]) not in ("info", ""):
+                    break
+                parts.append(next_msg)
+                j += 1
+            log_copy = dict(logs[i])
+            log_copy["message"] = "\n".join(parts)
+            error_logs.append(log_copy)
+            i = j
+        else:
+            # Skip "warning" entries — they're generic noise (slow query,
+            # retry counters, queue depth) never meant to match the KB, and
+            # they're frequent enough to crowd out the real exceptions in
+            # the most-recent-N window.
+            i += 1
+    # Dedupe by exception type (the last line of the stitched traceback,
+    # e.g. "DatabaseConnectionError: ...") so a run of repeats from the
+    # small, randomly-sampled EXCEPTIONS pool doesn't crowd out variety —
+    # keep the most recent occurrence of each distinct error type.
+    seen_types = set()
+    deduped = []
+    for log in reversed(error_logs):
+        exc_type = log["message"].splitlines()[-1].split(":")[0].strip()
+        if exc_type in seen_types:
+            continue
+        seen_types.add(exc_type)
+        deduped.append(log)
+    error_logs = list(reversed(deduped))[-max_errors:]
+
+    diagnoses = []
+    for log in error_logs:
+        message = log["message"]
+        docs = troubleshooting_retriever.invoke(message)
+        kb_context = "\n\n".join(f"[{d.metadata.get('source')}]\n{d.page_content}" for d in docs)
+
+        prompt = f"""
+        You are a debugging assistant. A service logged the following error:
+
+        {message}
+
+        Here is relevant guidance retrieved from the troubleshooting knowledge base:
+
+        {kb_context}
+
+        In 2-4 sentences, explain what's likely causing this error and how to
+        fix it, based on the retrieved guidance. If the retrieved context
+        doesn't cover it, say so plainly instead of guessing.
+        """
+        response = llm.invoke([HumanMessage(content=prompt)])
+        diagnoses.append({
+            "timestamp": log.get("timestamp"),
+            "message": message,
+            "diagnosis": response.content,
+        })
+
+    return diagnoses
+
+
+# ==========================================
 # DEFINE LANGGRAPH WORKFLOW
 # ==========================================
 # 1. Define the Chatbot State
@@ -111,11 +326,24 @@ def get_cached_context(query: str):
 
 
 # 2. Define the Agent node execution - optimized
-def chatbot_node(state: ChatState):
+def chatbot_node(state: ChatState, config: RunnableConfig):
     user_message = state["messages"][-1].content
+    thread_id = config.get("configurable", {}).get("thread_id", "default_thread")
 
     # Try cache first for faster response on repeated queries
     context = get_cached_context(user_message)
+
+    # Blend in any document the user uploaded for this conversation
+    session_context = get_session_context(thread_id, user_message)
+    if session_context:
+        context = f"{context}\n\n{session_context}" if context else session_context
+
+    # Blend in the troubleshooting knowledge base — lets users paste an error
+    # message directly into chat and get the same fix the log-diagnosis
+    # feature would give.
+    ts_context = get_troubleshooting_context(user_message)
+    if ts_context:
+        context = f"{context}\n\n{ts_context}" if context else ts_context
 
     # Shorter, more efficient system prompt
     system_prompt = f"""
@@ -125,6 +353,9 @@ def chatbot_node(state: ChatState):
 
     Instructions:
     - Use the context whenever possible.
+    - If the context includes a troubleshooting entry (Error / Cause /
+      Solution) that matches what the user described, give that solution
+      directly.
     - If the answer is not present in the context, say:
       "I don't have enough information to answer that based on the available documents."
     - Do NOT make up facts.
@@ -187,6 +418,59 @@ async def chat(request: ChatRequest):
         elapsed_time = time.time() - start_time
         logger.error(f"✗ Error ({elapsed_time:.2f}s): {str(e)}")
         return ChatResponse(reply=f"❌ Error: {str(e)}")
+
+
+@app.post("/upload")
+async def upload_document(file: UploadFile = File(...), thread_id: str = Form("default_thread")):
+    """Ingest an uploaded document into a per-conversation vector store so
+    the chatbot can answer questions about it on the fly."""
+    data = await file.read()
+    try:
+        text = extract_text(file.filename, data)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    if not text.strip():
+        raise HTTPException(status_code=400, detail="Could not extract any text from that file.")
+
+    chunks = text_splitter.split_text(text)
+    docs = [Document(page_content=chunk, metadata={"source": file.filename}) for chunk in chunks]
+
+    vs = session_vectorstores.get(thread_id)
+    if vs is None:
+        vs = Chroma(embedding_function=jina_embeddings, collection_name=f"session-{thread_id}")
+        session_vectorstores[thread_id] = vs
+    vs.add_documents(docs)
+    session_filenames.setdefault(thread_id, []).append(file.filename)
+
+    logger.info(f"Ingested '{file.filename}' for thread {thread_id}: {len(chunks)} chunks")
+    return {"status": "ok", "filename": file.filename, "chunks": len(chunks)}
+
+
+@app.delete("/upload/{thread_id}")
+async def clear_uploaded_documents(thread_id: str):
+    """Remove all uploaded documents for a conversation."""
+    session_vectorstores.pop(thread_id, None)
+    session_filenames.pop(thread_id, None)
+    return {"status": "ok"}
+
+
+@app.get("/diagnose-logs")
+async def diagnose_logs(service_id: str = None, limit: int = 100, max_errors: int = 5):
+    """Fetch recent logs from the dummy Render service, pull out the
+    error entries, and diagnose each one against the troubleshooting
+    knowledge base."""
+    sid = service_id or RENDER_DUMMY_SERVICE_ID
+    if not sid:
+        raise HTTPException(status_code=400, detail="No service_id provided and RENDER_DUMMY_SERVICE_ID not set")
+    try:
+        diagnoses = diagnose_render_errors(sid, limit=limit, max_errors=max_errors)
+    except requests.exceptions.HTTPError as e:
+        raise HTTPException(status_code=502, detail=f"Render API error: {e}")
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    return {"service_id": sid, "count": len(diagnoses), "diagnoses": diagnoses}
 
 
 @app.get("/health")
