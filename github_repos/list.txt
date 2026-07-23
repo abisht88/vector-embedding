@@ -1,0 +1,54 @@
+Quantitative Trading Engineering Assistant
+
+
+QuantConnect LEAN: Full algorithmic trading engine  (Order management, broker integration, portfolio, execution, live trading)
+
+quant-trading (je-suis-tm): Trading strategies (RSI, MACD, Bollinger Bands, Pair Trading, Options, Portfolio Optimization)
+
+Backtrader: Backtesting framework (Strategy execution, indicators, analyzers, data feeds, performance metrics)
+
+
+
+https://github.com/mementum/backtrader
+
+https://github.com/QuantConnect/Lean
+
+https://github.com/je-suis-tm/quant-trading
+
+
+
+
+
+
+Questions it should answer
+
+Strategy
+Explain MACD Strategy.
+What is Pair Trading?
+Difference between RSI and Bollinger Bands?
+Show Momentum strategy implementation.
+
+
+Backtesting
+How does Backtrader execute a strategy?
+How is commission calculated?
+Explain analyzers.
+How do I optimize parameters?
+
+
+LEAN
+How does LEAN process orders?
+Explain the Algorithm Framework.
+How is portfolio construction done?
+Difference between backtest and live mode.
+How are brokerage integrations implemented?
+Cross-repository
+
+These are the most interesting because they require retrieving information from multiple sources.
+
+How do I take a strategy from quant-trading and run it in Backtrader?
+Which framework is suitable for live trading?
+Compare Backtrader and LEAN.
+Which repository contains portfolio optimization?
+How would I convert an RSI strategy into a LEAN algorithm?
+Explain the end-to-end lifecycle from strategy development to live execution.
