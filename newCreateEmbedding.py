@@ -18,7 +18,7 @@ load_dotenv()
 # ==========================================
 
 docs_dir = "./rag_pipeline_docs"
-persist_db_dir = "./chroma_db"
+persist_db_dir = "chroma_db_1"
 
 all_documents = []
 
@@ -104,10 +104,10 @@ all_documents.extend(github_documents)
 print("Loading Confluence pages...")
 
 confluence_loader = ConfluenceLoader(
-    url="https://sakshijadhav2123.atlassian.net/wiki/spaces/~7120208d5930615bb548c89e9fc6c9bda1049e/pages/458755/Developer+Guide+Part+1+Introduction+System+Overview",
-    username="pajpanideep@gmail.com",
-    api_key=os.getenv("CONFLUENCE_API_TOKEN"),
-    space_key="ENG",
+    url="https://ashutoshbisht88.atlassian.net/wiki/x/EwAG",
+    username="ashutoshbisht88@gmail.com",
+    api_key="ATATT3xFfGF0ZrPJkaX26Orc79heKc4uN5q5rs2SgKZcgqTLloaTnnQAaPEiiIBeWYf_8ykueFa2K10a4IyhNGEoEb-9OQfqxyg5O_1en_6HrZ092BjwCx8Cm_J_8yL33Gi_4WO_eJLT77saEPudMfCpcau0ZD5eU4Jjxvo0V2MI91jEpZoifss=A4F1D3CB",
+    space_key="5fd75d101051d10075af0f44"
 )
 
 confluence_documents = confluence_loader.load()
