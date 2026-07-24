@@ -20,6 +20,7 @@ from langchain_core.runnables import RunnableConfig
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
 
 # REPLACED: ChatOllama with ChatGroq
+from langchain_ollama import OllamaEmbeddings
 from langchain_groq import ChatGroq
 
 from langgraph.checkpoint.memory import MemorySaver
@@ -27,7 +28,6 @@ from langgraph.graph import StateGraph, START, END
 from langgraph.graph.message import add_messages
 from pydantic import BaseModel
 from typing_extensions import TypedDict
-from jina_embeddings import JinaEmbeddings
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -69,12 +69,8 @@ persist_db_dir = "./chroma_db"
 logger.info(f"Loading ChromaDB from: {persist_db_dir}")
 
 # Setup the matching Nomic librarian model (smaller, faster embedding)
-embeddings = JinaEmbeddings(
-    api_key=os.environ["JINA_API_KEY"],
-    model="jina-embeddings-v5"
-)
-
-logger.info("Embeddings model loaded: jina-embeddings-v5")
+embeddings = OllamaEmbeddings(model="nomic-embed-text")
+logger.info("Embeddings model loaded: nomic-embed-text")
 
 # Load existing Chroma database folder
 vector_store = Chroma(
@@ -102,6 +98,45 @@ llm = ChatGroq(
 )
 logger.info("LLM model loaded: llama-3.3-70b-versatile via Groq")
 logger.info("=" * 80)
+
+
+# ==========================================
+# ON-THE-FLY DOCUMENT UPLOAD (per-conversation, in-memory)
+# ==========================================
+# Uploaded documents are embedded into a throwaway Chroma collection scoped
+# to the thread_id, so they only ever answer questions in that conversation
+# and never pollute the shared knowledge base in ./chroma_db.
+#
+# Uses Jina's hosted embeddings API (jina-embeddings-v5-omni-nano) instead of
+# the local Ollama model — only for this feature, everything else keeps
+# using `embeddings` (nomic-embed-text).
+class JinaEmbeddings:
+    def __init__(self, api_key: str, model: str = "jina-embeddings-v5-omni-nano"):
+        self.api_key = api_key
+        self.model = model
+
+    def _embed(self, texts: list[str]) -> list[list[float]]:
+        response = requests.post(
+            "https://api.jina.ai/v1/embeddings",
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+            },
+            json={"model": self.model, "input": texts},
+            timeout=60,
+        )
+        response.raise_for_status()
+        data = response.json()["data"]
+        return [item["embedding"] for item in data]
+
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        return self._embed(texts)
+
+    def embed_query(self, text: str) -> list[float]:
+        return self._embed([text])[0]
+
+
+jina_embeddings = JinaEmbeddings(api_key=os.environ.get("JINA_API_KEY"))
 
 session_vectorstores: dict[str, Chroma] = {}
 session_filenames: dict[str, list[str]] = {}
@@ -403,7 +438,7 @@ async def upload_document(file: UploadFile = File(...), thread_id: str = Form("d
 
     vs = session_vectorstores.get(thread_id)
     if vs is None:
-        vs = Chroma(embedding_function=embeddings, collection_name=f"session-{thread_id}")
+        vs = Chroma(embedding_function=jina_embeddings, collection_name=f"session-{thread_id}")
         session_vectorstores[thread_id] = vs
     vs.add_documents(docs)
     session_filenames.setdefault(thread_id, []).append(file.filename)

@@ -8,7 +8,7 @@ from langchain_community.document_loaders import (
     WebBaseLoader
 )
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from jina_embeddings import JinaEmbeddings
+from langchain_ollama import OllamaEmbeddings
 from langchain_chroma import Chroma
 from github_repos.github_repos import GITHUB_REPOS
 
@@ -49,7 +49,7 @@ for repo in GITHUB_REPOS:
     loader = GithubFileLoader(
         repo=repo,
         branch="master",
-        access_token=os.getenv.get("GITHUB_TOKEN"),
+        access_token=os.getenv("GITHUB_TOKEN"),
         github_api_url="https://api.github.com",
         file_filter=lambda file_path: file_path.endswith(
             (
@@ -106,8 +106,8 @@ print("Loading Confluence pages...")
 
 confluence_loader = ConfluenceLoader(
     url="https://ashutoshbisht88.atlassian.net/wiki",
-    username=os.getenv.get("CONFLUENCE_API_TOKEN"),
-    api_key=os.getenv.get("CONFLUENCE_USER"),
+    username="ashutoshbisht88@gmail.com",
+    api_key="ATATT3xFfGF0ZrPJkaX26Orc79heKc4uN5q5rs2SgKZcgqTLloaTnnQAaPEiiIBeWYf_8ykueFa2K10a4IyhNGEoEb-9OQfqxyg5O_1en_6HrZ092BjwCx8Cm_J_8yL33Gi_4WO_eJLT77saEPudMfCpcau0ZD5eU4Jjxvo0V2MI91jEpZoifss=A4F1D3CB",
     space_key="RAGHACK",
     cloud=True
 )
@@ -190,9 +190,8 @@ print(f"Created {len(documents)} chunks")
 
 print("Initializing embedding model...")
 
-embeddings = JinaEmbeddings(
-    api_key=os.environ["JINA_API_KEY"],
-    model="jina-embeddings-v5"
+embeddings = OllamaEmbeddings(
+    model="nomic-embed-text"
 )
 
 # ==========================================
